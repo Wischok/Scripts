@@ -1,0 +1,196 @@
+SHARKS AND MINNOWS — COMBO SYSTEM PLAN
+========================================
+
+This document hands off the in-progress combo system to a fresh Claude chat
+with access to the codebase. It assumes the reader can open and read all
+.cs files; this doc gives intent, file map, and the path forward — not
+re-derivable implementation detail.
+
+
+WHAT THE COMBO SYSTEM IS
+------------------------
+
+A Tekken-inspired layer on top of the existing strike system that turns
+isolated kicks into juggle chains where the soccer ball is the combo
+"opponent." Each strike has a combo role (Launcher / Aerial / Spike /
+PopUp / Bullet); the ball's air state gates which strikes may connect;
+the chain accumulates hits with momentum + decay tracking; ultimately
+the chain path will determine the kind of shot that fires (e.g.
+Launcher → Aerial → Bullet = high lob).
+
+The goals, in priority order:
+  1. Power-dash kicks feel weighty and chain into mid-air follow-ups.
+  2. Players can chain strikes together with timing, not button-mash.
+  3. The chain feeds back into the score / shot quality.
+
+
+KEY FILES (read these to ground yourself)
+-----------------------------------------
+
+Foundation (don't re-implement, these are done):
+  Assets/Scripts/Strike.cs                       — ScriptableObject, gained Property + CancelFromFrameIndex
+  Assets/Scripts/StrikeFrame.cs                  — linked-list animation keyframe with hitbox data
+  Assets/Scripts/HitProperty.cs                  — enum: Any / Launcher / Aerial / Spike / PopUp / Bullet
+  Assets/Scripts/HitPropertyRules.cs             — static IsValid(property, ball) — single source of truth for air-state gating
+  Assets/Scripts/KickType.cs                     — existing enum (Regular / SpinLeft / SpinRight / Upwards / SlamDown), orthogonal to HitProperty
+  Assets/Scripts/KickHandler.cs                  — owns ALL runtime strike state. Critical methods: BeginStrike, NextStrikeFrame, EndStrike, CollisionEnter (dash-kick path), WouldHitBeAPowerKick (CollisionManager peek), IsInCancelWindow
+  Assets/Scripts/ComboHandler.cs                 — on the ball. Window (physics slow-down), juggle stats (per-air-time), chain (cross-window continuity). ChainCount / LastHitProperty / InCombo / DecayProgress exposed for UI.
+  Assets/Scripts/FXManager.cs                    — OnHit (FX + ComboHandler.RegisterHit) plus stub hooks OnWhiff and OnFumble (TODO bodies — sound/particles to plug in later)
+  Assets/Scripts/CollisionManager.cs             — bespoke custom collision system (NOT Unity Physics). ResolveCollision push response has THREE skip layers: IsPairIgnored (post-strike pair window), IsIntangibleEntityPair (ball in hitstop/juggle vs MovingEntity), IsImminentPowerKick (predictive: dash kick about to fire). All three layers record contact events normally — only the push is skipped.
+  Assets/Scripts/Physics/EntityPhysics.cs        — MovementScale (combo window slow-down driver), EnterHitstop, InHitstop
+  Assets/Scripts/Entity/SoccerBall.cs            — IsIntangible = InHitstop || in SoccerBall_Juggle state. SpikeMinHeight / PopUpMaxHeight inspector thresholds.
+  Assets/Scripts/Entity/Player.cs                — TryChainStrikeInput (central strike-input router), TriggerFumble, IsFumbleLocked, FumbleLockoutFrames
+  Assets/Scripts/Entity/State Machine/States/PlayerHeadbutt.cs / PlayerSpinKickLeft.cs / PlayerSpinKickRight.cs / PlayerSlamDown.cs — all four strike states call TryChainStrikeInput at top of Execute
+  Assets/Scripts/Entity/State Machine/States/PlayerIdle.cs / PlayerMove.cs — strike input checks consolidated through TryChainStrikeInput (respects fumble lockout when starting fresh strikes too)
+
+Project conventions worth knowing before editing:
+  - 2.5D oblique projection. World positions are 3D via Position.Pos_4D = (x, y, z, w) where z = jump height, w = surface elevation, Pos_3D = (x, y, z+w). Use Pos_3D for distance math, NEVER transform.position (that's the oblique projected position).
+  - DistanceFromGround on Position returns Pos_4D.z (per-surface height) — correct for combo height checks because a ball sitting on a raised platform reads 0, not w.
+  - All hit/collision logic flows through CollisionManager and the strike sweep system. No Unity Physics2D.
+  - Strike animations fire OnStrikeBegin / OnStrikeNextFrame / OnStrikeEnd via Animator events → EntityAnimator → KickHandler.
+
+
+COMPLETED (for context, do not redo)
+------------------------------------
+
+[1] WIDEN HIT WINDOW FOR COMBO FOLLOW-UPS
+    Tuned existing ComboHandler/FXManager knobs. Also added _powerHitThreshold
+    (default 0.6) in KickHandler.CollisionEnter so dash collision kicks now
+    route through FXManager.OnHit and trigger hitstop + combo window — they
+    didn't before. This single change had the biggest feel impact.
+
+[2] DASH→HEADBUTT FOLLOW-THROUGH FIX
+    Three layers of collision-push suppression in CollisionManager.ResolveCollision:
+      a) IgnoreCollisionPair (pair, time-bounded, 15 frames) — registered after every strike that connects
+      b) IsIntangibleEntityPair (state-driven) — any ball in hitstop OR SoccerBall_Juggle vs MovingEntity
+      c) IsImminentPowerKick (predictive) — pre-resolution check that asks KickHandler if this frame's contact would qualify as a power dash kick; skips the contact-frame push so the kick fires cleanly from the event
+    All three RECORD the contact event normally — only the push is skipped — so CollisionEnter doesn't spuriously refire when suppression expires.
+
+[3] HITPROPERTY ENUM + AIR-STATE GATE
+    Added to Strike (default Any = no gate, backwards-compatible).
+    HitPropertyRules.IsValid is the single source of truth.
+    Gate check sits at the moment of confirmed geometric contact in
+    KickHandler.NextStrikeFrame. On gate fail: ball added to _ballsHit
+    (consumes the swing), FXManager.OnWhiff fires (stub for future
+    whiff sound/particle), no kick / no FX / no ignore-pair.
+    Per-ball thresholds: SoccerBall.SpikeMinHeight (1.5), PopUpMaxHeight (1.0).
+
+[4] COMBOHANDLER CHAIN STATE
+    Three independent layers on ComboHandler:
+      Window  — physics slow-down (existing, ~25 frames after each hit)
+      Juggle  — per-air-time stats (existing, reset on OnJuggleBegin)
+      Chain   — NEW: combo continuity for UI + scoring + shot routing.
+                 ChainCount, LastHitProperty, InCombo, DecayProgress.
+                 Decay default 60 frames (~1.2s) — intentionally LONGER
+                 than the window. RegisterHit now takes HitProperty.
+    FXManager.OnHit gained HitProperty parameter (passed through).
+    KickHandler dash-kick path passes _dashKickProperty (default Launcher).
+
+[5] STRIKE-TO-STRIKE CHAINING
+    Cancel window per Strike: CancelFromFrameIndex (default -1 = never).
+    KickHandler tracks _frameIndex; IsInCancelWindow returns true once
+    advanced past the threshold.
+    Player.TryChainStrikeInput is the central router with three outcomes:
+      - No active strike + not fumble-locked → return requested state
+      - Active strike + in cancel window → return requested state (current Exit cleans up)
+      - Active strike + NOT in cancel window → TriggerFumble, drop input
+      - Fumble-locked → drop input
+    TriggerFumble engages FumbleLockoutFrames (default 10) and fires FXManager.OnFumble (stub).
+    All four strike states call TryChainStrikeInput at top of Execute.
+    PlayerIdle / PlayerMove route their strike inputs through the same helper.
+
+
+REMAINING TASKS (in execution order)
+====================================
+
+[6] MOMENTUM MULTIPLIER
+    Drive a power scalar off ComboHandler.ChainCount that boosts shot power
+    on the next ball.Kick. Likely shape: multiplier = 1 + (chain * stepSize),
+    clamped to some max. Apply when computing totalPower in KickHandler
+    (both strike path and dash-kick path).
+    Open design Qs:
+      - Per-property multiplier (Aerial worth less than Bullet)?
+      - Decay when chain decays, or hold "earned" multiplier until next hit?
+      - Where to surface visually (UI bar? screen tint when high?)
+
+[7] JUST-FRAME TIMING BONUS
+    Extends the cancel-window mechanic: the FIRST few frames of the cancel
+    window are a "just-frame" zone. Hits chained inside it grant:
+      - Extra launch height / power bonus
+      - Visual/audio flourish (FXManager hook)
+      - Faster momentum multiplier tick (compounds with task 6)
+    Add _justFrameWindow (int) to Strike — cancel is allowed from
+    CancelFromFrameIndex through CancelFromFrameIndex + justFrameWindow
+    qualifies as just-frame; rest of the cancel window is "normal" cancel.
+    Plumb a JustFrame flag through Player.TryChainStrikeInput.
+
+[8] WALL PLAY
+    During juggle, ball bouncing off a wall counts as a HitProperty.PopUp
+    for chain purposes — extends the combo without a player input.
+    SoccerBall.Reflect already handles the wall bounce; needs to:
+      - Detect "we're juggling AND just bounced off a wall tagged Object"
+      - Call ComboHandler.RegisterHit with a synthetic strikerId (e.g. 0)
+        and HitProperty.PopUp
+    Open design Q: should momentum multiplier (task 6) tick for wall
+    bounces, or only for player-initiated hits? Probably only on player
+    hits — wall play extends but doesn't reward power.
+
+[9] COMBO PATH → SHOT TYPE
+    Re-routes the FINAL hit in a chain (Bullet ender, or chain-decay timeout
+    with chain >= some threshold) through a richer DetermineTrajectory.
+    Mapping (initial proposal, tune in playtest):
+      Launcher → Aerial → Bullet     = high lob shot
+      Launcher → Spike → Bullet      = low powerful drive
+      Aerial → Aerial → Aerial → Bullet = spinning curve (use KickType.SpinLeft/Right)
+      Wall → Aerial → Bullet         = banana kick with side spin
+    ComboHandler already tracks LastHitProperty; needs path history (small
+    ring buffer of last N HitProperty values) to recognize sequences.
+    Suggest: add HitProperty[] _pathHistory of size 4 on ComboHandler.
+    Pattern matcher reads the last K entries and routes shot type.
+
+
+AUTHORING TODOS THE USER OWES (not code work)
+---------------------------------------------
+
+These need to happen in Unity inspector, not C#:
+
+  - HitProperty: existing Strike assets default to Any. User should
+    classify Headbutt / Power Kick / Spin Kick L / Spin Kick R / Slam Down
+    with their combo roles (Launcher / Aerial / Spike / Bullet / etc.).
+  - CancelFromFrameIndex: existing strikes default to -1 (never cancellable).
+    User should set per-strike based on roughly 60–70% through the frame
+    chain. Without this set, NO chaining works.
+  - SpikeMinHeight / PopUpMaxHeight on SoccerBall: defaults are 1.5 / 1.0
+    units; may need playtest tuning per project unit scale.
+  - FumbleLockoutFrames on Player: default 10 (~0.2s at 50fps). Increase
+    to punish mashing harder; decrease for snappier recovery.
+  - _dashKickProperty on KickHandler: default HitProperty.Launcher;
+    only change if dash kicks should be classified differently.
+
+
+OPEN DESIGN QUESTIONS WORTH RAISING WITH THE USER
+-------------------------------------------------
+
+  - What ends a combo besides decay timeout? Bullet ender (probably yes,
+    a "shot" should consume the combo). Ball going out of bounds?
+    Ball entering a goal? Defender intercepting?
+  - Should there be a visible combo counter UI? ComboHandler exposes all
+    the read API needed; nothing has been built yet.
+  - How does the momentum multiplier (task 6) interact with whiffs?
+    A whiff currently does nothing — should it decay the chain? Reset it?
+  - Just-frame zone (task 7) should give visual feedback at the MOMENT of
+    perfect timing — probably FXManager needs an OnJustFrame hook.
+
+
+PRINCIPLES THIS PROJECT FOLLOWS (from user feedback during the work)
+--------------------------------------------------------------------
+
+  - Design conversation BEFORE implementation. Don't write code on
+    speculative requirements.
+  - Recommendations should call out trade-offs and let the user choose.
+  - One task at a time. Don't bundle.
+  - Defaults should preserve existing behavior (e.g. HitProperty.Any,
+    CancelFromFrameIndex = -1) so changes can be opted into per asset.
+  - Stubs for future systems (whiff sound, fumble sound, particles) live
+    in FXManager with TODO comments — don't implement the audio/VFX work
+    while building the gameplay mechanic.
