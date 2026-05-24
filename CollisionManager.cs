@@ -54,6 +54,12 @@ public class CollisionManager : MonoBehaviour
     private Dictionary<Collision, Dictionary<Position, CollisionEvent>> _currentCollisions  = new();
     private Dictionary<Collision, Dictionary<Position, CollisionEvent>> _previousCollisions = new();
 
+    // Pairs whose physical push response is temporarily suppressed. Events still fire so
+    // CollisionEnter doesn't re-trigger when the ignore expires. Key is the unordered
+    // (instanceID, instanceID) of the two Positions. Value is FixedUpdate frames remaining.
+    private readonly Dictionary<(int, int), int> _ignorePairs = new();
+    private readonly List<(int, int)>            _ignoreExpiredScratch = new();
+
     ///
     /// ---------- Unity Functions ---------------------------------------------------
     ///
@@ -66,7 +72,11 @@ public class CollisionManager : MonoBehaviour
             Destroy(gameObject);
     }
 
-    private void FixedUpdate() => ProcessTriggerEvents();
+    private void FixedUpdate()
+    {
+        TickIgnorePairs();
+        ProcessTriggerEvents();
+    }
 
     private void ProcessTriggerEvents()
     {
@@ -182,6 +192,22 @@ public class CollisionManager : MonoBehaviour
     public void DeregisterVolume(Collision volume) => _volumes.Remove(volume);
 
     /// Summary:
+    ///     Temporarily suppresses the physical push response between two Positions for
+    ///     `frames` FixedUpdate ticks. Collision events (Enter/Stay/Exit) continue to
+    ///     fire as normal — only the position resolution is skipped, so a chasing entity
+    ///     can pass through a freshly-launched ball without disrupting its trajectory.
+    ///     Re-registering an existing pair takes the longer of the two durations.
+    public void IgnoreCollisionPair(Position a, Position b, int frames)
+    {
+        if (a == null || b == null || frames <= 0) return;
+        (int, int) key = PairKey(a, b);
+        if (_ignorePairs.TryGetValue(key, out int existing))
+            _ignorePairs[key] = Mathf.Max(existing, frames);
+        else
+            _ignorePairs[key] = frames;
+    }
+
+    /// Summary:
     ///     Queries all registered Collision volumes for overlap with a world-space sphere.
     ///     Appends the Position of each overlapping volume to results (caller must clear
     ///     results before calling to avoid stale entries across frames).
@@ -260,6 +286,75 @@ public class CollisionManager : MonoBehaviour
         && volume.Position != null
         && _currentCollisions.TryGetValue(pos.CollisionVolume, out var m)
         && m.ContainsKey(volume.Position);
+
+    // Unordered pair key so IgnoreCollisionPair(a,b) and (b,a) hit the same entry.
+    private static (int, int) PairKey(Position a, Position b)
+    {
+        int idA = a.gameObject.GetInstanceID();
+        int idB = b.gameObject.GetInstanceID();
+        return idA < idB ? (idA, idB) : (idB, idA);
+    }
+
+    private bool IsPairIgnored(Position a, Position b)
+    {
+        if (a == null || b == null || _ignorePairs.Count == 0) return false;
+        return _ignorePairs.ContainsKey(PairKey(a, b));
+    }
+
+    // True when one side of the pair is a ball that's currently intangible (hitstop or
+    // juggle) AND the other side is a MovingEntity. Walls/floors (no MovingEntity) still
+    // push the ball normally, so this only suppresses entity↔ball physical interference.
+    private bool IsIntangibleEntityPair(Position a, Position b)
+    {
+        if (a == null || b == null) return false;
+
+        bool aBallIntangible = a.TryGetComponent<SoccerBall>(out var ballA) && ballA.IsIntangible;
+        bool bBallIntangible = b.TryGetComponent<SoccerBall>(out var ballB) && ballB.IsIntangible;
+        if (!aBallIntangible && !bBallIntangible) return false;
+
+        Position other = aBallIntangible ? b : a;
+        return other.TryGetComponent<MovingEntity>(out _);
+    }
+
+    // True when one side carries a KickHandler whose next contact with the ball on the
+    // other side would be processed as a power dash kick. Skipping the push on this
+    // frame lets the kick fire cleanly from the CollisionEnter event without an early
+    // bounce that would disrupt the kicked trajectory.
+    private bool IsImminentPowerKick(Position a, Position b)
+    {
+        if (a == null || b == null) return false;
+
+        if (a.TryGetComponent<KickHandler>(out var khA)
+            && b.TryGetComponent<SoccerBall>(out var ballB)
+            && khA.WouldHitBeAPowerKick(ballB))
+            return true;
+
+        if (b.TryGetComponent<KickHandler>(out var khB)
+            && a.TryGetComponent<SoccerBall>(out var ballA)
+            && khB.WouldHitBeAPowerKick(ballA))
+            return true;
+
+        return false;
+    }
+
+    // Decrement every ignore entry by one frame; remove expired entries. Called from
+    // FixedUpdate before ProcessTriggerEvents so this frame's resolution sees the
+    // updated counts.
+    private void TickIgnorePairs()
+    {
+        if (_ignorePairs.Count == 0) return;
+
+        // Snapshot keys into the scratch buffer so we can mutate the dictionary while iterating.
+        _ignoreExpiredScratch.Clear();
+        foreach (var key in _ignorePairs.Keys) _ignoreExpiredScratch.Add(key);
+
+        foreach (var key in _ignoreExpiredScratch)
+        {
+            int remaining = _ignorePairs[key] - 1;
+            if (remaining <= 0) _ignorePairs.Remove(key);
+            else                _ignorePairs[key] = remaining;
+        }
+    }
 
     private bool HasReverseTrigger(Position pos, Collision volume) =>
         pos.HasCollision
@@ -382,6 +477,25 @@ public class CollisionManager : MonoBehaviour
                     break;
                 }
 
+                // Record the contact first — Enter/Stay/Exit determined in FixedUpdate.
+                // Done before the push so ignored pairs (below) still fire events normally,
+                // preventing a spurious CollisionEnter when the ignore window expires.
+                if (!_currentCollisions.TryGetValue(volume, out var colMap))
+                    _currentCollisions[volume] = colMap = new();
+                colMap[pos] = new CollisionEvent(pos, volume, proposedCenter, contactNormal);
+
+                // Skip the physical push when any layer applies:
+                //   1. Pair is temporarily ignored (post-strike follow-through window).
+                //   2. One side is a ball currently intangible (hitstop or juggle) and the
+                //      other is a MovingEntity — only strikes may affect a ball in flight.
+                //   3. Contact would fire as a power dash kick this same frame; skipping
+                //      the push lets the kick apply cleanly without an early bounce.
+                // The contact event was recorded above so CollisionEnter won't refire when
+                // suppression ends.
+                if (IsPairIgnored(pos, volume.Position))         break;
+                if (IsIntangibleEntityPair(pos, volume.Position)) break;
+                if (IsImminentPowerKick(pos, volume.Position))    break;
+
                 // Push entity out along the true normal (computationally correct axis).
                 // Use the entity's actual shape radius (not bounding sphere) so the push
                 // lands exactly at the contact boundary; epsilon prevents next-frame re-entry.
@@ -403,11 +517,6 @@ public class CollisionManager : MonoBehaviour
                 {
                     newPos.x += minDist;
                 }
-
-                // Record — Enter/Stay/Exit determined in FixedUpdate.
-                if (!_currentCollisions.TryGetValue(volume, out var colMap))
-                    _currentCollisions[volume] = colMap = new();
-                colMap[pos] = new CollisionEvent(pos, volume, proposedCenter, contactNormal);
                 break;
         }
     }

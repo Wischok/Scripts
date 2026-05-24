@@ -28,6 +28,16 @@ public class SoccerBall : MovingEntity
     // Spin force is cancelled once its magnitude drops below this threshold.
     [SerializeField] private float _spinStopThreshold = 0.5f;
 
+    [Header("--- Combo State Thresholds ---")]
+
+    // Minimum Z (height off ground) at which a Spike strike may legally connect.
+    // Below this, the ball is too low to slam down on.
+    [SerializeField] private float _spikeMinHeight = 1.5f;
+
+    // Maximum Z (height off ground) at which a PopUp strike may legally connect.
+    // Above this, the ball is too high for a low-recovery hit.
+    [SerializeField] private float _popUpMaxHeight = 1.0f;
+
     private AudioSource  _audioSource;
     private ComboHandler _comboHandler;
 
@@ -41,6 +51,19 @@ public class SoccerBall : MovingEntity
     ///
 
     public ComboHandler ComboHandler => _comboHandler;
+
+    public float SpikeMinHeight => _spikeMinHeight;
+    public float PopUpMaxHeight => _popUpMaxHeight;
+
+    /// Summary:
+    ///     True while the ball is in hitstop or juggling. CollisionManager skips the
+    ///     physical push response against any MovingEntity in this state, so a chasing
+    ///     entity can't disrupt a freshly-launched or airborne ball. Walls and the floor
+    ///     are unaffected — only entity↔ball interaction is suppressed. Strikes still
+    ///     connect because they use the sweep system, not the collision push response.
+    public bool IsIntangible
+        => _entityPhysics.InHitstop
+        || m_stateMachine.GetCurrentState() is SoccerBall_Juggle;
 
     /// Summary:
     ///     True when the ball was last put into motion by a player kick (as opposed to a

@@ -41,6 +41,19 @@ public class KickHandler : MonoBehaviour
     // Compensates for the dash kick that was missed and combines both into the headbutt.
     [SerializeField] private float _dashComboBonus = 15f;
 
+    // Normalized force (0..1, mapped from min/maxKickForce) above which a collision
+    // kick counts as a "power hit" and triggers hitstop / combo window / FX.
+    [SerializeField, Range(0f, 1f)] private float _powerHitThreshold = 0.6f;
+
+    // After a strike connects, suppress physical collision response between this entity
+    // and the struck ball for this many FixedUpdate frames. Prevents the dashing entity
+    // from chasing the freshly-launched ball and disrupting its trajectory.
+    [SerializeField] private int _strikeIgnoreFrames = 15;
+
+    // HitProperty attributed to a power dash kick (CollisionEnter path, not an animation
+    // strike). Defaults to Launcher because dash kicks typically launch a grounded ball.
+    [SerializeField] private HitProperty _dashKickProperty = HitProperty.Launcher;
+
     [Header("--- Prediction ---")]
 
     // How far to scan for a ball when skewing the dash/strike direction.
@@ -59,6 +72,14 @@ public class KickHandler : MonoBehaviour
     public bool CollidedWithBall { get; private set; } = false;
     public bool HasActiveStrike  => _activeStrike != null;
 
+    // True once the active strike has advanced past its CancelFromFrameIndex, meaning
+    // a new strike input may interrupt this one cleanly. False before the window opens
+    // (player must wait or fumble) and false when the strike has no configured window.
+    public bool IsInCancelWindow
+        => _activeStrike != null
+        && _activeStrike.CancelFromFrameIndex >= 0
+        && _frameIndex >= _activeStrike.CancelFromFrameIndex;
+
     ///
     /// -------- Components ------------------------------------------------------------------
     ///
@@ -73,6 +94,11 @@ public class KickHandler : MonoBehaviour
 
     private Strike      _activeStrike;
     private StrikeFrame _currentFrame;
+
+    // Counts NextStrikeFrame advances within the active strike. 0 at BeginStrike,
+    // increments on each NextStrikeFrame call. Reset on EndStrike. Used by
+    // IsInCancelWindow to gate strike-to-strike chaining.
+    private int _frameIndex;
 
     // Normalized XY direction the entity was facing at BeginStrike.
     // The XY components of each frame's LocalOffset are rotated by this direction so
@@ -96,6 +122,25 @@ public class KickHandler : MonoBehaviour
     public void ClearFrameFlags()
     {
         CollidedWithBall = false;
+    }
+
+    /// Summary:
+    ///     Predictive check used by CollisionManager.ResolveCollision before applying the
+    ///     physical push response. Returns true if a contact between this entity and the
+    ///     given ball, on this frame, would be processed by the dash-kick path as a power
+    ///     kick. CollisionManager skips the push when this is true so the contact-frame
+    ///     bounce doesn't disrupt the about-to-fire kick.
+    ///
+    ///     Mirrors the gating logic in CollisionEnter exactly: not mid-strike, and
+    ///     normalized force from current velocity meets _powerHitThreshold.
+    public bool WouldHitBeAPowerKick(SoccerBall ball)
+    {
+        if (HasActiveStrike) return false;
+        if (ball == null)    return false;
+
+        float force           = Mathf.Clamp(_ep.LinearVelocity.magnitude * forceMultiplier, minKickForce, maxKickForce);
+        float normalizedPower = Mathf.InverseLerp(minKickForce, maxKickForce, force);
+        return normalizedPower >= _powerHitThreshold;
     }
 
     /// Summary:
@@ -202,6 +247,7 @@ public class KickHandler : MonoBehaviour
 
         _activeStrike = strike;
         _currentFrame = strike.FirstFrame;
+        _frameIndex   = 0;
         _ballsHit.Clear();
 
         // Derive facing from horizontal velocity then skew toward the nearest ball in range.
@@ -235,6 +281,7 @@ public class KickHandler : MonoBehaviour
 
         StrikeFrame prevFrame = _currentFrame;
         _currentFrame = _currentFrame.NextFrame;
+        _frameIndex++;
 
         if (_currentFrame == null)
         {
@@ -274,6 +321,15 @@ public class KickHandler : MonoBehaviour
 
             _ballsHit.Add(ballId);
 
+            // HitProperty gate: even with geometric contact, the strike only connects if
+            // the ball's air state matches the strike's combo role. A whiff consumes the
+            // swing for this ball (already added to _ballsHit) but applies no kick or FX.
+            if (!HitPropertyRules.IsValid(_activeStrike.Property, ball))
+            {
+                FXManager.Instance.OnWhiff(_ep, ball.Physics, _activeStrike.Property);
+                continue;
+            }
+
             // Quality is measured at the current frame's world position, not along the segment.
             float d     = Vector3.Distance(ball.Position.Pos_3D, FrameWorldPos(_currentFrame));
             float rs    = _currentFrame.SweetSpotRadius;
@@ -293,7 +349,8 @@ public class KickHandler : MonoBehaviour
             ball.Kick(kickDir, totalPower, binding.KickType);
 
             float normalizedPower = binding.BaseForce > 0f ? Mathf.Clamp01(totalPower / binding.BaseForce) : 0f;
-            FXManager.Instance.OnHit(_ep, ball.Physics, normalizedPower);
+            FXManager.Instance.OnHit(_ep, ball.Physics, normalizedPower, _activeStrike.Property);
+            CollisionManager.Instance.IgnoreCollisionPair(_position, ball.Position, _strikeIgnoreFrames);
         }
     }
 
@@ -305,6 +362,7 @@ public class KickHandler : MonoBehaviour
     {
         _activeStrike = null;
         _currentFrame = null;
+        _frameIndex   = 0;
         _ballsHit.Clear();
         _isDashCombo  = false;
     }
@@ -326,6 +384,16 @@ public class KickHandler : MonoBehaviour
 
         ball.Kick(trajectory, force);
         CollidedWithBall = true;
+
+        // Power threshold for FX/combo eligibility — only "real" hits open the window.
+        // A power dash kick is treated as a strike: same FX pipeline + same collision
+        // ignore so the dashing entity doesn't follow through and disrupt the kick.
+        float normalizedPower = Mathf.InverseLerp(minKickForce, maxKickForce, force);
+        if (normalizedPower >= _powerHitThreshold)
+        {
+            FXManager.Instance.OnHit(_ep, ball.Physics, normalizedPower, _dashKickProperty);
+            CollisionManager.Instance.IgnoreCollisionPair(_position, ball.Position, _strikeIgnoreFrames);
+        }
     }
 
     /// Summary:

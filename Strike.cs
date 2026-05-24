@@ -17,4 +17,14 @@ using UnityEngine;
 public class Strike : ScriptableObject
 {
     [SerializeReference] public StrikeFrame FirstFrame;
+
+    // Combo role of this strike. Gates when the strike is allowed to connect based on
+    // the struck ball's air state. See HitPropertyRules.IsValid. Default Any = no gate.
+    public HitProperty Property = HitProperty.Any;
+
+    // After this many NextStrikeFrame advances, the strike enters its cancel window —
+    // a new strike input will interrupt this one and start the next strike immediately.
+    // Set to -1 (default) to disable cancelling: the strike must fully recover before
+    // another can begin, and early input triggers a fumble penalty on the player.
+    public int CancelFromFrameIndex = -1;
 }

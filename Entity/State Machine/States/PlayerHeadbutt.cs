@@ -12,9 +12,17 @@ public class PlayerHeadbutt : State
 
     public override void Execute(Player entity)
     {
+        // Chain into another strike if input arrives within this strike's cancel window;
+        // mistimed input triggers a fumble penalty and is dropped.
+        if (entity.TryChainStrikeInput(out State next))
+        {
+            entity.ChangeState(next);
+            return;
+        }
+
         if(headbuttTimer < entity.HeadbuttDuration)
             headbuttTimer += Time.deltaTime;
-            
+
         else
         {
             //after headbutt duration, return to previous state

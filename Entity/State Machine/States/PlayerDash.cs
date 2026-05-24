@@ -25,6 +25,28 @@ public class PlayerDash : State
             return;
         }
         
+        //check if player spin kicked right
+        if(entity.InputHandler.SpinKickedRight)
+        {
+            entity.ChangeState(new PlayerSpinKickRight());
+            return;
+        }
+
+        //check if player spin kicked left
+        if(entity.InputHandler.SpinKickedLeft)
+        {
+            entity.ChangeState(new PlayerSpinKickLeft());
+            return;
+        }
+
+        //check if player slammed down
+        if(entity.InputHandler.SlammedDown)
+        {
+            entity.ChangeState(new PlayerSlamDown());
+            return;
+        }
+
+        
         //if player dash duration has elapsed, update states
         if (_timeElapsed >= entity.DashDuration)
         {

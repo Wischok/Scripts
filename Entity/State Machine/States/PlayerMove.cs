@@ -23,10 +23,11 @@ public class PlayerMove : State
             return;
         }
 
-        //check if player headbutted
-        if(entity.InputHandler.Headbutted)
+        // Strike inputs route through the chain helper so fumble lockout is respected
+        // even when starting a fresh strike (not just when chaining mid-strike).
+        if (entity.TryChainStrikeInput(out State next))
         {
-            entity.ChangeState(new PlayerHeadbutt());
+            entity.ChangeState(next);
             return;
         }
 

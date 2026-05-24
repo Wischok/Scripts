@@ -39,9 +39,10 @@ public class InputHandler : MonoBehaviour
         }
     }
     public bool Headbutted => ConsumeInput(_headbuttAction);
+    public bool SlammedDown => ConsumeInput(_slamDownAction);
     public bool SpawnedBall => ConsumeInput(_spawnBallAction);
-    public bool KickSpunRight => ConsumeInput(_kickSpinRightAction);
-    public bool KickSpunLeft => ConsumeInput(_kickSpinLeftAction);
+    public bool SpinKickedRight => ConsumeInput(_kickSpinRightAction);
+    public bool SpinKickedLeft => ConsumeInput(_kickSpinLeftAction);
 
     ///
     /// --------- Private Variables ----------------------------------------------------------
@@ -53,6 +54,7 @@ public class InputHandler : MonoBehaviour
     private InputAction _jumpAction;//player jump action
     private InputAction _dashAction;//player dash action
     private InputAction _headbuttAction;//player headbutt action
+    private InputAction _slamDownAction;//player slam down action
     private InputAction _spawnBallAction;//player spawn ball action
     private InputAction _kickSpinRightAction;//player kick spin right action
     private InputAction _kickSpinLeftAction;//player kick spin left action
@@ -97,6 +99,7 @@ public class InputHandler : MonoBehaviour
         _spawnBallAction = InputSystem.actions.FindAction("SpawnBall");
         _kickSpinRightAction = InputSystem.actions.FindAction("KickSpinRight");
         _kickSpinLeftAction = InputSystem.actions.FindAction("KickSpinLeft");
+        _slamDownAction = InputSystem.actions.FindAction("SlamDown");
     }
 
     private void OnEnable()
@@ -110,6 +113,7 @@ public class InputHandler : MonoBehaviour
         Register(_jumpAction);
         Register(_dashAction);
         Register(_headbuttAction);
+        Register(_slamDownAction);
         Register(_spawnBallAction);
         Register(_kickSpinRightAction);
         Register(_kickSpinLeftAction);
@@ -130,7 +134,8 @@ public class InputHandler : MonoBehaviour
         Unregister(_headbuttAction);
         Unregister(_kickSpinRightAction);
         Unregister(_kickSpinLeftAction);
-
+        Unregister(_slamDownAction);
+        
         //disable actions
         _moveAction.Disable();
         _pauseAction.Disable();

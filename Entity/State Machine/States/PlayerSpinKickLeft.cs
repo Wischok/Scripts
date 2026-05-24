@@ -11,6 +11,12 @@ public class PlayerSpinKickLeft : State
 
     public override void Execute(Player entity)
     {
+        if (entity.TryChainStrikeInput(out State next))
+        {
+            entity.ChangeState(next);
+            return;
+        }
+
         _timer += Time.deltaTime;
         if (_timer < entity.SpinKickDuration) return;
 

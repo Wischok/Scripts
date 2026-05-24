@@ -19,6 +19,12 @@ public class Player : MovingEntity
     [Header("--- Slam Down Settings ---")]
     [field: SerializeField] public float SlamDownDuration { get; private set; } = 0.8f;
 
+    [Header("--- Strike Chaining ---")]
+
+    // FixedUpdate frames that strike inputs are rejected after a mistimed (pre-cancel-window)
+    // attempt. Punishes mashing so players are incentivized to wait for the cancel window.
+    [field: SerializeField] public int FumbleLockoutFrames { get; private set; } = 10;
+
     /// 
     /// ------- Public Variables ------------------------------------
     /// 
@@ -37,6 +43,9 @@ public class Player : MovingEntity
 
     //public reference to ball interactions handler for player states to check for ball interactions
     public KickHandler KickHandler => _kickHandler;
+
+    // True while a fumble penalty is active — strike inputs are rejected until this clears.
+    public bool IsFumbleLocked => _fumbleLockoutRemaining > 0;
 
     ///
     /// ------- Player Components ------------------------------------------------
@@ -58,6 +67,9 @@ public class Player : MovingEntity
     /// 
     /// Note: referenced for player input values
     private InputHandler _inputHandler;
+
+    // Frames remaining in the current fumble lockout. Ticked down each FixedUpdate.
+    private int _fumbleLockoutRemaining = 0;
 
     ///
     /// ------- Unity Methods ------------------------------------
@@ -87,6 +99,8 @@ public class Player : MovingEntity
     protected override void FixedUpdate()
     {
         base.FixedUpdate();
+
+        if (_fumbleLockoutRemaining > 0) _fumbleLockoutRemaining--;
 
         //clear frame flags for components
         _kickHandler.ClearFrameFlags();
@@ -128,6 +142,9 @@ public class Player : MovingEntity
 
     public void Headbutt()
     {
+        // Stop player movement immediately when the headbutt starts so the hitbox is more likely to connect with the ball.
+        _entityPhysics.SetVelocity(Vector3.zero);
+
         // Signal dash combo before the animator fires OnStrikeBegin so KickHandler
         // has the flag set when the first NextStrikeFrame detects a hit.
         _kickHandler.SetDashCombo(Dashed);
@@ -174,5 +191,60 @@ public class Player : MovingEntity
     public void SlamDownExit()
     {
         _entityAnimator.SetBool("slamDown", false);
+    }
+
+    ///
+    /// ------- Strike Chaining ------------------------------------------------
+    ///
+
+    /// Summary:
+    ///     Central strike-input router used by every state that may begin a strike
+    ///     (PlayerIdle / PlayerMove for fresh starts; strike states for chaining).
+    ///
+    ///     Reads strike-input flags and decides whether to transition. Behavior:
+    ///       - No strike input: returns false; caller continues normal logic.
+    ///       - Fumble lockout active: returns false; input is dropped (penalty in effect).
+    ///       - No active strike: returns the requested strike state.
+    ///       - Active strike in cancel window: returns the requested strike state
+    ///         (caller transitions; current strike's Exit cleans up).
+    ///       - Active strike NOT yet in cancel window: triggers fumble penalty and
+    ///         returns false. Current strike continues unaffected.
+    public bool TryChainStrikeInput(out State next)
+    {
+        next = null;
+
+        State requested = null;
+        if      (_inputHandler.Headbutted)      requested = new PlayerHeadbutt();
+        else if (_inputHandler.SpinKickedLeft)  requested = new PlayerSpinKickLeft();
+        else if (_inputHandler.SpinKickedRight) requested = new PlayerSpinKickRight();
+        else if (_inputHandler.SlammedDown)     requested = new PlayerSlamDown();
+
+        if (requested == null) return false;
+
+        if (IsFumbleLocked) return false;
+
+        if (!_kickHandler.HasActiveStrike)
+        {
+            next = requested;
+            return true;
+        }
+
+        if (_kickHandler.IsInCancelWindow)
+        {
+            next = requested;
+            return true;
+        }
+
+        TriggerFumble();
+        return false;
+    }
+
+    /// Summary:
+    ///     Engages the fumble lockout for FumbleLockoutFrames and fires the FX hook.
+    ///     Strike inputs are rejected while IsFumbleLocked is true.
+    public void TriggerFumble()
+    {
+        _fumbleLockoutRemaining = FumbleLockoutFrames;
+        FXManager.Instance.OnFumble(_entityPhysics);
     }
 }

@@ -22,11 +22,23 @@ public class ComboHandler : MonoBehaviour
     [SerializeField] private int   _extensionFrames = 10;
     [SerializeField] private float _windowScale     = 0.30f;
 
+    [Header("--- Combo Chain ---")]
+
+    // How long after a hit the chain remains alive. Intentionally longer than the window:
+    // the slow-down may end but subsequent hits still count as chain continuations.
+    [SerializeField] private int _decayFrames = 60;
+
     ///
     /// ------- Public Properties ------------------------------------------------------------
     ///
 
     public bool InComboWindow => _windowFramesRemaining > 0;
+
+    // Chain state (consumed by UI, momentum multiplier, shot-routing).
+    public int         ChainCount      => _chainCount;
+    public HitProperty LastHitProperty => _lastHitProperty;
+    public bool        InCombo         => _decayRemaining > 0;
+    public float       DecayProgress   => _decayFrames > 0 ? (float)_decayRemaining / _decayFrames : 0f;
 
     ///
     /// ------- Private State ----------------------------------------------------------------
@@ -39,6 +51,11 @@ public class ComboHandler : MonoBehaviour
     private float        _juggleAirTime = 0f;
     private HashSet<int> _participants  = new();
 
+    // Chain tracking — outlives the window; resets only when decay expires.
+    private int         _chainCount      = 0;
+    private int         _decayRemaining  = 0;
+    private HitProperty _lastHitProperty = HitProperty.Any;
+
     private EntityPhysics _physics;
 
     ///
@@ -49,13 +66,14 @@ public class ComboHandler : MonoBehaviour
 
     private void FixedUpdate()
     {
-        if (_windowFramesRemaining <= 0) return;
-
-        if (--_windowFramesRemaining == 0)
+        if (_windowFramesRemaining > 0 && --_windowFramesRemaining == 0)
         {
             _physics.MovementScale = 1f;
             OnWindowExpired();
         }
+
+        if (_decayRemaining > 0 && --_decayRemaining == 0)
+            ResetChain();
     }
 
     ///
@@ -85,15 +103,22 @@ public class ComboHandler : MonoBehaviour
     }
 
     /// Summary:
-    ///     Records a hit against this ball and re-opens the combo window.
+    ///     Records a hit against this ball, refreshes the combo window, extends the
+    ///     chain, and refreshes the chain decay timer.
     ///     Called by FXManager.OnHit so the juggle tracker knows who contributed.
     ///
     /// Parameters:
     ///     strikerInstanceId: GameObject.GetInstanceID() of the hitting entity.
-    public void RegisterHit(int strikerInstanceId)
+    ///     property:          HitProperty role of the strike that landed.
+    public void RegisterHit(int strikerInstanceId, HitProperty property)
     {
         _juggleHits++;
         _participants.Add(strikerInstanceId);
+
+        _chainCount++;
+        _lastHitProperty = property;
+        _decayRemaining  = _decayFrames;
+
         OpenWindow();
     }
 
@@ -124,5 +149,13 @@ public class ComboHandler : MonoBehaviour
     private void OnWindowExpired()
     {
         // Window closed without the juggle ending — data persists for the ongoing juggle.
+    }
+
+    // Chain expired without a follow-up hit. Clears chain count and last property;
+    // juggle stats are unaffected (they reset on OnJuggleBegin).
+    private void ResetChain()
+    {
+        _chainCount      = 0;
+        _lastHitProperty = HitProperty.Any;
     }
 }

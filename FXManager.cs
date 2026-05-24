@@ -89,23 +89,47 @@ public class FXManager : MonoBehaviour
     ///     ball:             EntityPhysics of the ball that was struck.
     ///     powerMultiplier:  0..1 where 1 is a perfect sweet-spot hit at maximum force.
     ///                       Scales hitstop duration, shake intensity, vibration, and particle density.
-    public void OnHit(EntityPhysics striker, EntityPhysics ball, float powerMultiplier)
+    ///     property:         HitProperty role of the strike — passed to ComboHandler so the
+    ///                       chain remembers its last move (for shot routing / multipliers).
+    public void OnHit(EntityPhysics striker, EntityPhysics ball, float powerMultiplier, HitProperty property)
     {
         int frames = Mathf.RoundToInt(Mathf.Lerp(_hitstopFramesMin, _hitstopFramesMax, powerMultiplier));
 
         striker.EnterHitstop(frames, _hitstopTimeScale, blockForces: false);
         ball.EnterHitstop(frames, _hitstopTimeScale, blockForces: true);
 
-        // Open the combo window and record the hit for juggle tracking.
+        // Record the hit — RegisterHit refreshes the window and extends the chain.
         if (ball.TryGetComponent<ComboHandler>(out var combo))
-        {
-            combo.OpenWindow();
-            combo.RegisterHit(striker.gameObject.GetInstanceID());
-        }
+            combo.RegisterHit(striker.gameObject.GetInstanceID(), property);
 
         AddTrauma(_defaultTrauma * powerMultiplier);
         TriggerVibration(powerMultiplier);
         SpawnImpactParticles(ball.transform.position, powerMultiplier);
+    }
+
+    /// Summary:
+    ///     Called when a strike's swept hit detection lands on a ball but the strike's
+    ///     HitProperty was invalid for the ball's current air state (e.g. Spike attempted
+    ///     while the ball is grounded). No kick is applied; this hook exists so a future
+    ///     whiff sound + unsatisfying particle effect can be plugged in without
+    ///     touching the gate logic in KickHandler.
+    public void OnWhiff(EntityPhysics striker, EntityPhysics ball, HitProperty attemptedProperty)
+    {
+        _ = striker;
+        _ = ball;
+        _ = attemptedProperty;
+        // TODO: whiff sound + low-quality particle effect.
+    }
+
+    /// Summary:
+    ///     Called when the player attempts a new strike too early — before the active
+    ///     strike's cancel window opens. The input is rejected and the player enters a
+    ///     brief fumble lockout. This hook exists so a future fumble sound + visual
+    ///     stagger / shake can be plugged in.
+    public void OnFumble(EntityPhysics striker)
+    {
+        _ = striker;
+        // TODO: fumble sound + brief stumble particle / shake.
     }
 
     ///
